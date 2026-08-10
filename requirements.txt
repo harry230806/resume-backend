@@ -1,0 +1,7 @@
+litellm @ https://customer-assets.emergentagent.com/internal-asset/library/litellm-1.80.0-py3-none-any.whl
+reportlab==5.0.0
+fastapi
+uvicorn
+google-genai
+pydantic
+python-dotenv
