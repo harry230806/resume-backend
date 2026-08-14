@@ -132,7 +132,7 @@ async def call_openrouter(system: str, user_text: str) -> str:
     )
     
     response = await client.chat.completions.create(
-        model='openai/gpt-5.6-sol',
+        model='meta-llama/llama-3-8b-instruct:free', # Change this line!
         messages=[
             {"role": "system", "content": system},
             {"role": "user", "content": user_text}
