@@ -141,6 +141,14 @@ async def call_openrouter(system: str, user_text: str) -> str:
             {"role": "user", "content": user_text}
         ]
     )
+    # Grab the AI's response
+    raw_response = response.choices[0].message.content
+    
+    # Forcefully strip out brackets, braces, and quotes
+    clean_response = raw_response.replace('"', '').replace('[', '').replace(']', '').replace('{', '').replace('}', '')
+    
+    # Return the clean string instead of the raw one
+    return clean_response
     return response.choices[0].message.content
 
 def extract_json_array(text: str) -> list:
