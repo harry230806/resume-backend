@@ -124,13 +124,15 @@ import os
 from fastapi import HTTPException
 from groq import AsyncGroq
 
-# Read API keys from environment
+# Aggressively clean the keys from the environment
 raw_keys = os.environ.get('GROQ_API_KEYS', '')
-API_KEYS = [k.strip() for k in raw_keys.split(',') if k.strip()]
 
-# Fallback to GROQ_API_KEY if single key is used
+# This splits the keys by comma and strips out any spaces AND quotes!
+API_KEYS = [k.strip(' "\'') for k in raw_keys.split(',') if k.strip(' "\'')]
+
+# Fallback to GROQ_API_KEY if single key is used, cleaning it as well
 if not API_KEYS and os.environ.get('GROQ_API_KEY'):
-    API_KEYS = [os.environ.get('GROQ_API_KEY').strip()]
+    API_KEYS = [os.environ.get('GROQ_API_KEY').strip(' "\'')]
 
 
 async def call_openrouter(system: str, user_text: str) -> str:
