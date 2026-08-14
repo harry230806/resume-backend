@@ -119,20 +119,23 @@ class PDFRequest(BaseModel):
     resume: ResumeData
     session_id: Optional[str] = None
 
-# --- LLM helpers with key rotation ---
+# --- Configure Groq API ---
+import os
+from groq import AsyncGroq # Make sure to import this!
+
+GROQ_API_KEY = os.environ.get('GROQ_API_KEY', '')
+
 async def call_openrouter(system: str, user_text: str) -> str:
-    if not OPENROUTER_API_KEYS:
-        raise HTTPException(status_code=500, detail="AI keys not configured")
+    if not GROQ_API_KEY:
+        raise HTTPException(status_code=500, detail="Groq API key not configured")
     
-    current_key = next(key_cycle)
-    
-    client = AsyncOpenAI(
-        base_url="https://openrouter.ai/api/v1",
-        api_key=current_key
+    # Using the official Groq client!
+    client = AsyncGroq(
+        api_key=GROQ_API_KEY
     )
     
     response = await client.chat.completions.create(
-        model='meta-llama/llama-3-8b-instruct:free', # Change this line!
+        model='llama-3.1-8b-instant',
         messages=[
             {"role": "system", "content": system},
             {"role": "user", "content": user_text}
