@@ -124,11 +124,11 @@ import os
 from fastapi import HTTPException
 from groq import AsyncGroq
 
-# Read comma-separated keys and clean whitespace
+# Read API keys from environment
 raw_keys = os.environ.get('GROQ_API_KEYS', '')
 API_KEYS = [k.strip() for k in raw_keys.split(',') if k.strip()]
 
-# Fallback to single GROQ_API_KEY if defined
+# Fallback to GROQ_API_KEY if single key is used
 if not API_KEYS and os.environ.get('GROQ_API_KEY'):
     API_KEYS = [os.environ.get('GROQ_API_KEY').strip()]
 
@@ -139,7 +139,6 @@ async def call_openrouter(system: str, user_text: str) -> str:
 
     last_error = None
 
-    # Try each API key in order until one succeeds
     for key in API_KEYS:
         try:
             client = AsyncGroq(api_key=key)
@@ -153,30 +152,29 @@ async def call_openrouter(system: str, user_text: str) -> str:
             )
 
             raw_response = response.choices[0].message.content
-            # Strip unwanted characters and linebreaks
-clean_response = (
-    raw_response.replace('"', '')
-    .replace("'", '')
-    .replace('[', '')
-    .replace(']', '')
-    .replace('{', '')
-    .replace('}', '')
-    .replace('\n', ', ')
-    .strip()
-)
 
-# Clean up any double commas
-clean_response = ", ".join([s.strip(" -*•") for s in clean_response.split(",") if s.strip(" -*•")])
+            # Clean unwanted brackets, quotes, and newlines
+            cleaned = (
+                raw_response.replace('"', '')
+                .replace("'", '')
+                .replace('[', '')
+                .replace(']', '')
+                .replace('{', '')
+                .replace('}', '')
+                .replace('\n', ', ')
+                .strip()
+            )
 
-return clean_response
+            # Format into clean comma-separated items
+            clean_response = ", ".join([s.strip(" -*•") for s in cleaned.split(",") if s.strip(" -*•")])
+            return clean_response
 
         except Exception as e:
             last_error = e
-            continue  # Move to the next key if this one fails
+            continue
 
-    # If all keys fail
     raise HTTPException(
-        status_code=500, 
+        status_code=500,
         detail=f"All API keys failed. Last error: {str(last_error)}"
     )
 
