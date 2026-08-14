@@ -14,7 +14,8 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 from typing import List, Optional
 
-from google import genai
+# OpenAI SDK for OpenRouter
+from openai import AsyncOpenAI
 from reportlab.lib.pagesizes import LETTER
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
@@ -27,19 +28,18 @@ from reportlab.platypus import (
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
-# --- Configure Google Gemini with Multiple Keys ---
-keys_str = os.environ.get('GEMINI_API_KEYS', os.environ.get('GEMINI_API_KEY', ''))
-GEMINI_API_KEYS = [k.strip() for k in keys_str.split(',') if k.strip()]
+# --- Configure OpenRouter with Multiple Keys ---
+keys_str = os.environ.get('OPENROUTER_API_KEYS', os.environ.get('OPENROUTER_API_KEY', ''))
+OPENROUTER_API_KEYS = [k.strip() for k in keys_str.split(',') if k.strip()]
 
-if not GEMINI_API_KEYS:
-    print("WARNING: No GEMINI_API_KEYS found in environment variables.")
+if not OPENROUTER_API_KEYS:
+    print("WARNING: No OPENROUTER_API_KEYS found in environment variables.")
 
 # Create a cyclic iterator to rotate through keys automatically
-key_cycle = itertools.cycle(GEMINI_API_KEYS) if GEMINI_API_KEYS else None
+key_cycle = itertools.cycle(OPENROUTER_API_KEYS) if OPENROUTER_API_KEYS else None
 
 app = FastAPI()
 
-# --- FIX: CORS Middleware MUST be right at the top so it handles requests properly ---
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
@@ -120,24 +120,25 @@ class PDFRequest(BaseModel):
     session_id: Optional[str] = None
 
 # --- LLM helpers with key rotation ---
-async def call_gemini(system: str, user_text: str) -> str:
-    if not GEMINI_API_KEYS:
+async def call_openrouter(system: str, user_text: str) -> str:
+    if not OPENROUTER_API_KEYS:
         raise HTTPException(status_code=500, detail="AI keys not configured")
     
-    # Grab the next key in the rotation for this request
     current_key = next(key_cycle)
     
-    # Initialize the NEW client
-    client = genai.Client(api_key=current_key)
-    
-    prompt = f"System Instructions: {system}\n\nUser Input: {user_text}"
-    
-    # Generate content using the new SDK and your available model
-    response = client.models.generate_content(
-        model='gemini-3.1-flash-lite',
-        contents=prompt
+    client = AsyncOpenAI(
+        base_url="https://openrouter.ai/api/v1",
+        api_key=current_key
     )
-    return response.text
+    
+    response = await client.chat.completions.create(
+        model='openai/gpt-5.6-sol',
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": user_text}
+        ]
+    )
+    return response.choices[0].message.content
 
 def extract_json_array(text: str) -> list:
     text = text.strip()
@@ -165,7 +166,7 @@ async def suggest_skills(req: SkillsSuggestRequest, request: Request):
     system = "You are an expert career coach. Return ONLY a compact JSON array of 10 concise, ATS-friendly, industry-standard skill names (no explanations). No numbering."
     user = f"Field / target area: {req.field}\nExperience level: {req.experience_level}\nReturn a JSON array of 10 skills."
     try:
-        raw = await call_gemini(system, user)
+        raw = await call_openrouter(system, user)
         skills = extract_json_array(raw)
         return {"skills": [s for s in skills if isinstance(s, str)][:12]}
     except Exception as e:
@@ -179,7 +180,7 @@ async def suggest_roles(req: RolesSuggestRequest, request: Request):
     system = "You are an ATS-savvy career coach. Return ONLY a compact JSON array of 6 realistic job titles matching the candidate's skills and experience. Titles only, no explanations."
     user = f"Skills: {', '.join(req.skills) or 'general'}\nExperience: {exp_summary}\nReturn a JSON array of 6 titles."
     try:
-        raw = await call_gemini(system, user)
+        raw = await call_openrouter(system, user)
         roles = extract_json_array(raw)
         return {"roles": [r for r in roles if isinstance(r, str)][:8]}
     except Exception as e:
@@ -195,7 +196,7 @@ async def generate_summary(req: SummaryRequest, request: Request):
     system = "You are an expert resume writer specializing in ATS-friendly summaries. Write a crisp 3-4 sentence professional summary in first person implied (no 'I'), packed with keywords for the target role. Return ONLY the plain summary text (no preface, no quotes)."
     user = f"Candidate: {req.name}\nTarget Role: {req.target_role}\nSkills: {', '.join(req.skills)}\nEducation: {edu}\nExperience: {exp}\nProjects: {proj}\nWrite the summary now (3-4 sentences, keyword-optimized)."
     try:
-        raw = await call_gemini(system, user)
+        raw = await call_openrouter(system, user)
         summary = raw.strip().strip('"').strip("'")
         summary = re.sub(r"^(here\s+is[^:]*:|summary:)\s*", "", summary, flags=re.I).strip()
         return {"summary": summary}
@@ -208,7 +209,6 @@ async def pick_template(req: SummaryRequest):
     exp_count = len(req.experience)
     proj_count = len(req.projects)
     
-    # Logic: Assign styles based on experience and project count
     if exp_count >= 5:
         tpl = "executive"
     elif exp_count >= 3:
@@ -235,7 +235,6 @@ def build_pdf(resume: ResumeData) -> bytes:
     )
     styles = getSampleStyleSheet()
     
-    # --- 1. Template Flags ---
     tpl = resume.template
     is_two_col = (tpl == "two-column")
     is_minimal = (tpl == "minimal")
@@ -246,15 +245,13 @@ def build_pdf(resume: ResumeData) -> bytes:
     is_elegant = (tpl == "elegant")
     is_startup = (tpl == "startup")
     
-    # --- 2. Color Palettes ---
-    if is_creative: current_accent = HexColor("#E84A5F")  # Coral
-    elif is_executive: current_accent = HexColor("#2F4F4F")  # Slate Gray
-    elif is_terminal: current_accent = HexColor("#006400")   # Dark Green
-    elif is_startup: current_accent = HexColor("#6B21A8")    # Vibrant Purple
-    elif is_modern or is_two_col: current_accent = HexColor("#002FA7") # Blue
+    if is_creative: current_accent = HexColor("#E84A5F")
+    elif is_executive: current_accent = HexColor("#2F4F4F")
+    elif is_terminal: current_accent = HexColor("#006400")
+    elif is_startup: current_accent = HexColor("#6B21A8")
+    elif is_modern or is_two_col: current_accent = HexColor("#002FA7")
     else: current_accent = black
 
-    # --- 3. Dynamic Fonts ---
     if is_terminal:
         base_font, bold_font = "Courier", "Courier-Bold"
     elif is_elegant:
@@ -262,7 +259,6 @@ def build_pdf(resume: ResumeData) -> bytes:
     else:
         base_font, bold_font = "Helvetica", "Helvetica-Bold"
 
-    # --- 4. Dynamic Styles ---
     name_style = ParagraphStyle(
         "Name", parent=styles["Title"], fontName=bold_font,
         fontSize=24 if is_creative or is_startup else 22, 
@@ -299,13 +295,11 @@ def build_pdf(resume: ResumeData) -> bytes:
 
     story = []
 
-    # --- Header Rendering ---
     story.append(Paragraph(resume.name or "Your Name", name_style))
     contact_bits = [b for b in [resume.email, resume.phone, resume.address] if b]
     if contact_bits:
         story.append(Paragraph(" &nbsp;•&nbsp; ".join(contact_bits), contact_style))
         
-    # Dynamic divider line
     story.append(HRFlowable(
         width="100%", 
         thickness=1.5 if is_executive else (0.5 if is_elegant else 0.7), 
