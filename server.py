@@ -121,35 +121,56 @@ class PDFRequest(BaseModel):
 
 # --- Configure Groq API ---
 import os
-from groq import AsyncGroq # Make sure to import this!
+from fastapi import HTTPException
+from groq import AsyncGroq
 
-GROQ_API_KEY = os.environ.get('GROQ_API_KEY', '')
+# Read comma-separated keys and clean whitespace
+raw_keys = os.environ.get('GROQ_API_KEYS', '')
+API_KEYS = [k.strip() for k in raw_keys.split(',') if k.strip()]
+
+# Fallback to single GROQ_API_KEY if defined
+if not API_KEYS and os.environ.get('GROQ_API_KEY'):
+    API_KEYS = [os.environ.get('GROQ_API_KEY').strip()]
+
 
 async def call_openrouter(system: str, user_text: str) -> str:
-    if not GROQ_API_KEY:
-        raise HTTPException(status_code=500, detail="Groq API key not configured")
-    
-    # Using the official Groq client!
-    client = AsyncGroq(
-        api_key=GROQ_API_KEY
+    if not API_KEYS:
+        raise HTTPException(status_code=500, detail="No Groq API keys configured")
+
+    last_error = None
+
+    # Try each API key in order until one succeeds
+    for key in API_KEYS:
+        try:
+            client = AsyncGroq(api_key=key)
+
+            response = await client.chat.completions.create(
+                model='llama-3.1-8b-instant',
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user_text}
+                ]
+            )
+
+            raw_response = response.choices[0].message.content
+            clean_response = (
+                raw_response.replace('"', '')
+                .replace('[', '')
+                .replace(']', '')
+                .replace('{', '')
+                .replace('}', '')
+            )
+            return clean_response
+
+        except Exception as e:
+            last_error = e
+            continue  # Move to the next key if this one fails
+
+    # If all keys fail
+    raise HTTPException(
+        status_code=500, 
+        detail=f"All API keys failed. Last error: {str(last_error)}"
     )
-    
-    response = await client.chat.completions.create(
-        model='llama-3.1-8b-instant',
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user_text}
-        ]
-    )
-    # Grab the AI's response
-    raw_response = response.choices[0].message.content
-    
-    # Forcefully strip out brackets, braces, and quotes
-    clean_response = raw_response.replace('"', '').replace('[', '').replace(']', '').replace('{', '').replace('}', '')
-    
-    # Return the clean string instead of the raw one
-    return clean_response
-    return response.choices[0].message.content
 
 def extract_json_array(text: str) -> list:
     text = text.strip()
