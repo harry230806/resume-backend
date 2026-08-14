@@ -153,14 +153,22 @@ async def call_openrouter(system: str, user_text: str) -> str:
             )
 
             raw_response = response.choices[0].message.content
-            clean_response = (
-                raw_response.replace('"', '')
-                .replace('[', '')
-                .replace(']', '')
-                .replace('{', '')
-                .replace('}', '')
-            )
-            return clean_response
+            # Strip unwanted characters and linebreaks
+clean_response = (
+    raw_response.replace('"', '')
+    .replace("'", '')
+    .replace('[', '')
+    .replace(']', '')
+    .replace('{', '')
+    .replace('}', '')
+    .replace('\n', ', ')
+    .strip()
+)
+
+# Clean up any double commas
+clean_response = ", ".join([s.strip(" -*•") for s in clean_response.split(",") if s.strip(" -*•")])
+
+return clean_response
 
         except Exception as e:
             last_error = e
