@@ -137,6 +137,9 @@ async def call_groq(system: str, user_text: str) -> str:
     last_error = None
 
     for key in API_KEYS:
+        # --- ADD THE DEBUG LINE RIGHT HERE ---
+        print(f"DEBUGGING -> Trying Key: {key[:8]}... Length: {len(key)}")
+        
         try:
             client = AsyncGroq(api_key=key)
 
