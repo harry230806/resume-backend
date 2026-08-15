@@ -9,13 +9,13 @@ import json
 import re
 import time
 import io
-import itertools
 from pathlib import Path
 from pydantic import BaseModel, Field
 from typing import List, Optional
 
-# OpenAI SDK for OpenRouter
-from openai import AsyncOpenAI
+# --- Groq SDK Import ---
+from groq import AsyncGroq
+
 from reportlab.lib.pagesizes import LETTER
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
@@ -25,21 +25,31 @@ from reportlab.platypus import (
     SimpleDocTemplate, Paragraph, Spacer, HRFlowable
 )
 
+# --- Initialize Logger First ---
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
-# --- Configure OpenRouter with Multiple Keys ---
-keys_str = os.environ.get('OPENROUTER_API_KEYS', os.environ.get('OPENROUTER_API_KEY', ''))
-OPENROUTER_API_KEYS = [k.strip() for k in keys_str.split(',') if k.strip()]
+# --- Configure Groq API with Fallback ---
+raw_keys = os.environ.get('GROQ_API_KEYS', '')
+# This splits the keys by comma and aggressively strips out any spaces AND quotes
+API_KEYS = [k.strip(' "\'') for k in raw_keys.split(',') if k.strip(' "\'')]
 
-if not OPENROUTER_API_KEYS:
-    print("WARNING: No OPENROUTER_API_KEYS found in environment variables.")
+# Fallback to GROQ_API_KEY if single key is used, cleaning it as well
+if not API_KEYS and os.environ.get('GROQ_API_KEY'):
+    API_KEYS = [os.environ.get('GROQ_API_KEY').strip(' "\'')]
 
-# Create a cyclic iterator to rotate through keys automatically
-key_cycle = itertools.cycle(OPENROUTER_API_KEYS) if OPENROUTER_API_KEYS else None
+if not API_KEYS:
+    logger.warning("No GROQ_API_KEYS found in environment variables.")
 
 app = FastAPI()
 
+# --- CORS Middleware MUST be right at the top ---
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
@@ -119,25 +129,10 @@ class PDFRequest(BaseModel):
     resume: ResumeData
     session_id: Optional[str] = None
 
-# --- Configure Groq API ---
-import os
-from fastapi import HTTPException
-from groq import AsyncGroq
-
-# Aggressively clean the keys from the environment
-raw_keys = os.environ.get('GROQ_API_KEYS', '')
-
-# This splits the keys by comma and strips out any spaces AND quotes!
-API_KEYS = [k.strip(' "\'') for k in raw_keys.split(',') if k.strip(' "\'')]
-
-# Fallback to GROQ_API_KEY if single key is used, cleaning it as well
-if not API_KEYS and os.environ.get('GROQ_API_KEY'):
-    API_KEYS = [os.environ.get('GROQ_API_KEY').strip(' "\'')]
-
-
-async def call_openrouter(system: str, user_text: str) -> str:
+# --- LLM helpers with Groq Key Fallback ---
+async def call_groq(system: str, user_text: str) -> str:
     if not API_KEYS:
-        raise HTTPException(status_code=500, detail="No Groq API keys configured")
+        raise HTTPException(status_code=500, detail="Groq API keys not configured")
 
     last_error = None
 
@@ -152,24 +147,7 @@ async def call_openrouter(system: str, user_text: str) -> str:
                     {"role": "user", "content": user_text}
                 ]
             )
-
-            raw_response = response.choices[0].message.content
-
-            # Clean unwanted brackets, quotes, and newlines
-            cleaned = (
-                raw_response.replace('"', '')
-                .replace("'", '')
-                .replace('[', '')
-                .replace(']', '')
-                .replace('{', '')
-                .replace('}', '')
-                .replace('\n', ', ')
-                .strip()
-            )
-
-            # Format into clean comma-separated items
-            clean_response = ", ".join([s.strip(" -*•") for s in cleaned.split(",") if s.strip(" -*•")])
-            return clean_response
+            return response.choices[0].message.content
 
         except Exception as e:
             last_error = e
@@ -177,23 +155,38 @@ async def call_openrouter(system: str, user_text: str) -> str:
 
     raise HTTPException(
         status_code=500,
-        detail=f"All API keys failed. Last error: {str(last_error)}"
+        detail=f"All Groq API keys failed. Last error: {str(last_error)}"
     )
 
-def extract_json_array(text: str) -> list:
-    text = text.strip()
-    m = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
-    if m:
-        text = m.group(1).strip()
-    m = re.search(r"\[[\s\S]*\]", text)
-    if m:
-        try:
-            return json.loads(m.group(0))
-        except Exception:
-            pass
-    lines = [re.sub(r"^[\-\*\d\.\)\s]+", "", ln).strip().strip('"').strip("'")
-             for ln in text.splitlines() if ln.strip()]
-    return [l for l in lines if l][:20]
+# --- Bulletproof List Cleaner ---
+def extract_clean_list(raw_text: str) -> list:
+    # 1. Strip all JSON/code formatting characters and turn newlines into commas
+    cleaned = (
+        raw_text.replace('"', '')
+        .replace("'", '')
+        .replace('[', '')
+        .replace(']', '')
+        .replace('{', '')
+        .replace('}', '')
+        .replace('`', '')
+        .replace('\n', ',')
+    )
+    
+    # 2. Split strictly by comma
+    raw_items = cleaned.split(',')
+    
+    # 3. Clean up bullets and whitespace for each individual button
+    final_list = []
+    for item in raw_items:
+        clean_item = item.strip(" -*•\t\n")
+        # Remove any numbering like "1.", "2)", etc.
+        clean_item = re.sub(r"^\d+[\.\)]\s*", "", clean_item)
+        
+        # Only add it if it's an actual word (prevents tiny blank buttons)
+        if len(clean_item) > 1: 
+            final_list.append(clean_item)
+            
+    return final_list
 
 # --- Routes ---
 @api_router.get("/")
@@ -203,12 +196,12 @@ async def root():
 @api_router.post("/ai/suggest-skills")
 async def suggest_skills(req: SkillsSuggestRequest, request: Request):
     rate_limit(get_session_key(request, req.session_id))
-    system = "You are an expert career coach. Return ONLY a compact JSON array of 10 concise, ATS-friendly, industry-standard skill names (no explanations). No numbering."
-    user = f"Field / target area: {req.field}\nExperience level: {req.experience_level}\nReturn a JSON array of 10 skills."
+    system = "You are an expert career coach. Return ONLY a single line of 10 comma-separated skill names (no explanations, no numbering, no JSON)."
+    user = f"Field / target area: {req.field}\nExperience level: {req.experience_level}\nReturn 10 comma-separated skills."
     try:
-        raw = await call_openrouter(system, user)
-        skills = extract_json_array(raw)
-        return {"skills": [s for s in skills if isinstance(s, str)][:12]}
+        raw = await call_groq(system, user)
+        skills = extract_clean_list(raw)
+        return {"skills": skills[:12]}
     except Exception as e:
         logger.exception("AI skills error")
         raise HTTPException(status_code=502, detail=f"AI error: {e}")
@@ -217,12 +210,12 @@ async def suggest_skills(req: SkillsSuggestRequest, request: Request):
 async def suggest_roles(req: RolesSuggestRequest, request: Request):
     rate_limit(get_session_key(request, req.session_id))
     exp_summary = "; ".join([f"{e.get('role','')} at {e.get('company','')}" for e in req.experience if e.get('role')]) or "no prior work experience"
-    system = "You are an ATS-savvy career coach. Return ONLY a compact JSON array of 6 realistic job titles matching the candidate's skills and experience. Titles only, no explanations."
-    user = f"Skills: {', '.join(req.skills) or 'general'}\nExperience: {exp_summary}\nReturn a JSON array of 6 titles."
+    system = "You are an ATS-savvy career coach. Return ONLY a single line of 6 comma-separated job titles matching the candidate's skills and experience (no explanations, no JSON)."
+    user = f"Skills: {', '.join(req.skills) or 'general'}\nExperience: {exp_summary}\nReturn 6 comma-separated titles."
     try:
-        raw = await call_openrouter(system, user)
-        roles = extract_json_array(raw)
-        return {"roles": [r for r in roles if isinstance(r, str)][:8]}
+        raw = await call_groq(system, user)
+        roles = extract_clean_list(raw)
+        return {"roles": roles[:8]}
     except Exception as e:
         logger.exception("AI roles error")
         raise HTTPException(status_code=502, detail=f"AI error: {e}")
@@ -236,7 +229,7 @@ async def generate_summary(req: SummaryRequest, request: Request):
     system = "You are an expert resume writer specializing in ATS-friendly summaries. Write a crisp 3-4 sentence professional summary in first person implied (no 'I'), packed with keywords for the target role. Return ONLY the plain summary text (no preface, no quotes)."
     user = f"Candidate: {req.name}\nTarget Role: {req.target_role}\nSkills: {', '.join(req.skills)}\nEducation: {edu}\nExperience: {exp}\nProjects: {proj}\nWrite the summary now (3-4 sentences, keyword-optimized)."
     try:
-        raw = await call_openrouter(system, user)
+        raw = await call_groq(system, user)
         summary = raw.strip().strip('"').strip("'")
         summary = re.sub(r"^(here\s+is[^:]*:|summary:)\s*", "", summary, flags=re.I).strip()
         return {"summary": summary}
@@ -249,6 +242,7 @@ async def pick_template(req: SummaryRequest):
     exp_count = len(req.experience)
     proj_count = len(req.projects)
     
+    # Logic: Assign styles based on experience and project count
     if exp_count >= 5:
         tpl = "executive"
     elif exp_count >= 3:
@@ -275,6 +269,7 @@ def build_pdf(resume: ResumeData) -> bytes:
     )
     styles = getSampleStyleSheet()
     
+    # --- 1. Template Flags ---
     tpl = resume.template
     is_two_col = (tpl == "two-column")
     is_minimal = (tpl == "minimal")
@@ -285,13 +280,15 @@ def build_pdf(resume: ResumeData) -> bytes:
     is_elegant = (tpl == "elegant")
     is_startup = (tpl == "startup")
     
-    if is_creative: current_accent = HexColor("#E84A5F")
-    elif is_executive: current_accent = HexColor("#2F4F4F")
-    elif is_terminal: current_accent = HexColor("#006400")
-    elif is_startup: current_accent = HexColor("#6B21A8")
-    elif is_modern or is_two_col: current_accent = HexColor("#002FA7")
+    # --- 2. Color Palettes ---
+    if is_creative: current_accent = HexColor("#E84A5F")  # Coral
+    elif is_executive: current_accent = HexColor("#2F4F4F")  # Slate Gray
+    elif is_terminal: current_accent = HexColor("#006400")   # Dark Green
+    elif is_startup: current_accent = HexColor("#6B21A8")    # Vibrant Purple
+    elif is_modern or is_two_col: current_accent = HexColor("#002FA7") # Blue
     else: current_accent = black
 
+    # --- 3. Dynamic Fonts ---
     if is_terminal:
         base_font, bold_font = "Courier", "Courier-Bold"
     elif is_elegant:
@@ -299,6 +296,7 @@ def build_pdf(resume: ResumeData) -> bytes:
     else:
         base_font, bold_font = "Helvetica", "Helvetica-Bold"
 
+    # --- 4. Dynamic Styles ---
     name_style = ParagraphStyle(
         "Name", parent=styles["Title"], fontName=bold_font,
         fontSize=24 if is_creative or is_startup else 22, 
@@ -335,11 +333,13 @@ def build_pdf(resume: ResumeData) -> bytes:
 
     story = []
 
+    # --- Header Rendering ---
     story.append(Paragraph(resume.name or "Your Name", name_style))
     contact_bits = [b for b in [resume.email, resume.phone, resume.address] if b]
     if contact_bits:
         story.append(Paragraph(" &nbsp;•&nbsp; ".join(contact_bits), contact_style))
         
+    # Dynamic divider line
     story.append(HRFlowable(
         width="100%", 
         thickness=1.5 if is_executive else (0.5 if is_elegant else 0.7), 
@@ -409,12 +409,6 @@ async def resume_pdf(req: PDFRequest, request: Request):
 
 # Include the router after setting up middleware
 app.include_router(api_router)
-
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8001)
