@@ -144,7 +144,7 @@ async def call_groq(system: str, user_text: str) -> str:
             client = AsyncGroq(api_key=key)
 
             response = await client.chat.completions.create(
-                model='llama-3.1-8b-instant',
+                model='openai/gpt-oss-120b',
                 messages=[
                     {"role": "system", "content": system},
                     {"role": "user", "content": user_text}
